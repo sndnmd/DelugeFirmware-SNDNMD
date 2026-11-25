@@ -1,0 +1,82 @@
+Personal test build of the Deluge community firmware with three added
+features. Based on `release/1.3` (commit `7ed25ad`). Source: branch
+`arlo-fugue` in this repository.
+
+**This is experimental.** Back up your SD card and keep your current
+firmware file so you can go back.
+
+## Install
+
+1. Copy `deluge-arlo-v12-fugue-v5.bin` to the root of the SD card
+   (remove any other `.bin` there).
+2. Hold SHIFT while switching the Deluge on.
+3. Settings > Community Features: switch on what you want to try.
+   All three are off by default.
+
+| 7-seg | OLED               |
+|-------|--------------------|
+| FUGU  | Fugue              |
+| ARLO  | Arranger Loop      |
+| ARFX  | Arranger Loop 2+FX |
+
+## Arranger Loop (ARLO)
+
+A loop lane below the last track in arranger view. Yellow is the loop,
+the green pad is its start (A), the red pad its end (B). Playback wraps
+from B to A without stopping.
+
+- Set a marker: tap it (it blinks), then tap where it should go.
+- Loop on/off: the lane's mute pad.
+- Hold a loop pad + PLAY: start from A.
+- Hold a loop pad + turn `<>`: move the whole loop.
+- Hold a loop pad + tap outside the loop: jump by the loop's length.
+- Grid view: a yellow sidebar pad switches from the playing clips into
+  the looped arrangement when the clips finish.
+- Loop points are saved with the song.
+
+## Arranger Loop 2+FX (ARFX, needs ARLO)
+
+A second, purple loop lane with its own set of 25 song FX values
+(filters, delay, reverb, EQ, bitcrush, mod FX, volume, pan and more).
+
+- The purple loop follows the yellow one until you move it. Only one
+  loop is on at a time.
+- Hold the purple body: its FX are heard. Let go: back to the song's.
+  While held, the gold knobs edit purple's values.
+- SHIFT + tap purple: latch. Hold purple + BACK: reset its FX.
+- Fade in: hold green + press red (over the loop), or the 1st to 4th
+  pad to its right (1 to 4 bars).
+- Fade out: the same from the red pad, towards the left.
+- SHIFT + a fade gesture: the fade latches and repeats on every pass.
+
+## Fugue (FUGU)
+
+A new entry in the clip menu, after Arpeggiator and Randomizer. It
+copies the clip's notes into three more voices, each one transformed.
+For synth, MIDI and CV clips, not kits.
+
+Menu: `DEST`, `VOI2`, `VOI3`, `VOI4`, `RAND`, `APPL`
+
+- `DEST`: `CLIP` writes the next three clips of the same track,
+  `TRAC` writes three cloned tracks, `BOTH` fills a 4x4 block with
+  slight variants.
+- Per voice: on, pitch (scale-aware), octave, invert, direction,
+  rotate, tempo (1/8 to 8), resolution; arp mode, sync, gate, rhythm;
+  randomizer lock, note probability, velocity spread, bass probability.
+- `RAND` rolls moderate values for all voices.
+- `APPL` writes the voices. It asks `OVER` before replacing clips that
+  already hold notes.
+
+## Known limits and test status
+
+- Fugue: no undo, Apply clears the undo history. Automation and MPE
+  are not copied.
+- Tested on hardware, mainly on a 7-segment Deluge and also on an OLED
+  model: about 30 minutes of use without issues.
+- The purple loop's FX (hold, latch, fades) work, but are still a bit
+  unintuitive and rough around the edges.
+- The wider Fugue tempo range (1/8 to 8) is new in this build and has
+  not been on hardware yet.
+- One freeze happened in earlier testing; the cause is not found.
+
+Feedback is welcome, please open an issue here.
