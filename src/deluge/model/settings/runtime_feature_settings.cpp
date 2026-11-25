@@ -191,6 +191,10 @@ void RuntimeFeatureSettings::init() {
 	                  STRING_FOR_COMMUNITY_FEATURE_HORIZONTAL_MENUS, "enableHorizontalMenus",
 	                  RuntimeFeatureStateToggle::On);
 
+	// Fugue
+	SetupOnOffSetting(settings[RuntimeFeatureSettingType::Fugue], STRING_FOR_COMMUNITY_FEATURE_FUGUE, "fugue",
+	                  RuntimeFeatureStateToggle::Off);
+
 	// Trim from start of audio clip
 	SetupOnOffSetting(settings[RuntimeFeatureSettingType::TrimFromStartOfAudioClip],
 	                  STRING_FOR_COMMUNITY_FEATURE_TRIM_FROM_START_OF_AUDIO_CLIP, "trimFromStartOfAudioClip",
@@ -217,6 +221,15 @@ void RuntimeFeatureSettings::init() {
 	    {l10n::getView(STRING_FOR_SHORTCUT_OVERLAY_MENU_AND_CLIP),
 	     static_cast<uint32_t>(RuntimeFeatureStateShortcutOverlay::MenuAndClip)},
 	};
+
+	// Arranger Loop (loop lane with A / B points in arranger view)
+	SetupOnOffSetting(settings[RuntimeFeatureSettingType::ArrangerLoop], STRING_FOR_COMMUNITY_FEATURE_ARRANGER_LOOP,
+	                  "arrangerLoop", RuntimeFeatureStateToggle::Off);
+
+	// Arranger Loop 2 + FX (second, purple loop lane with its own song FX settings). Needs Arranger Loop to be on
+	SetupOnOffSetting(settings[RuntimeFeatureSettingType::ArrangerLoop2Fx],
+	                  STRING_FOR_COMMUNITY_FEATURE_ARRANGER_LOOP_2_FX, "arrangerLoop2Fx",
+	                  RuntimeFeatureStateToggle::Off);
 }
 
 void RuntimeFeatureSettings::factoryReset(bool showPopup) {

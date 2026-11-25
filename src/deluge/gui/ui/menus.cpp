@@ -77,6 +77,7 @@
 #include "gui/menu_item/filter_route.h"
 #include "gui/menu_item/firmware/version.h"
 #include "gui/menu_item/flash/status.h"
+#include "gui/menu_item/fugue/fugue_menu.h"
 #include "gui/menu_item/fx/clipping.h"
 #include "gui/menu_item/gate/mode.h"
 #include "gui/menu_item/gate/off_time.h"
@@ -683,6 +684,66 @@ PLACE_SDRAM_BSS submenu::PolyMonoConversion midiMPEMenu{STRING_FOR_MPE_MONO,
 // Clip-level stuff --------------------------------------------------------------------------
 
 PLACE_SDRAM_BSS sequence::Direction sequenceDirectionMenu{STRING_FOR_PLAY_DIRECTION};
+
+// Fugue (community feature) -------------------------------------------------------------------
+// Copies the clip's notes into up to three further clips ("voices 2-4"), each with its own offsets.
+
+PLACE_SDRAM_BSS fugue_menu::Destination fugueDestinationMenu{STRING_FOR_FUGUE_DESTINATION};
+PLACE_SDRAM_BSS fugue_menu::Randomize fugueRandomizeMenu{STRING_FOR_FUGUE_RANDOMIZE};
+PLACE_SDRAM_BSS fugue_menu::Apply fugueApplyMenu{STRING_FOR_FUGUE_APPLY};
+
+// One set of items per voice; `index` is the voice's slot in fugue.voices
+#define DEFINE_FUGUE_VOICE_MENU(number, index)                                                                         \
+	PLACE_SDRAM_BSS fugue_menu::VoiceOn fugueVoice##number##On{STRING_FOR_FUGUE_ON, index};                            \
+	PLACE_SDRAM_BSS fugue_menu::VoiceNumber fugueVoice##number##Pitch{STRING_FOR_FUGUE_PITCH, index,                   \
+	                                                                  fugue_menu::VoiceNumber::Kind::PITCH};           \
+	PLACE_SDRAM_BSS fugue_menu::VoiceNumber fugueVoice##number##Octave{STRING_FOR_FUGUE_OCTAVE, index,                 \
+	                                                                   fugue_menu::VoiceNumber::Kind::OCTAVE};         \
+	PLACE_SDRAM_BSS fugue_menu::VoiceInvert fugueVoice##number##Invert{STRING_FOR_FUGUE_INVERT, index};                \
+	PLACE_SDRAM_BSS fugue_menu::VoiceDirection fugueVoice##number##Direction{STRING_FOR_FUGUE_DIRECTION, index};       \
+	PLACE_SDRAM_BSS fugue_menu::VoiceNumber fugueVoice##number##Rotate{STRING_FOR_FUGUE_ROTATE, index,                 \
+	                                                                   fugue_menu::VoiceNumber::Kind::ROTATE};         \
+	PLACE_SDRAM_BSS fugue_menu::VoiceTempo fugueVoice##number##Tempo{STRING_FOR_FUGUE_TEMPO, index};                   \
+	PLACE_SDRAM_BSS fugue_menu::VoiceReso fugueVoice##number##Reso{STRING_FOR_FUGUE_RESO, index};                      \
+	PLACE_SDRAM_BSS fugue_menu::VoiceArpMode fugueVoice##number##ArpMode{STRING_FOR_FUGUE_ARP_MODE, index};            \
+	PLACE_SDRAM_BSS fugue_menu::VoiceArpSync fugueVoice##number##ArpSync{STRING_FOR_FUGUE_ARP_SYNC, index};            \
+	PLACE_SDRAM_BSS fugue_menu::VoiceExtraNumber fugueVoice##number##ArpGate{STRING_FOR_FUGUE_ARP_GATE, index,         \
+	                                                                         deluge::fugue::Extra::ARP_GATE, "Gate"};  \
+	PLACE_SDRAM_BSS fugue_menu::VoiceExtraNumber fugueVoice##number##ArpRhythm{                                        \
+	    STRING_FOR_FUGUE_ARP_RHYTHM, index, deluge::fugue::Extra::ARP_RHYTHM, "Rhyt"};                                 \
+	PLACE_SDRAM_BSS fugue_menu::VoiceLock fugueVoice##number##Lock{STRING_FOR_FUGUE_LOCK, index};                      \
+	PLACE_SDRAM_BSS fugue_menu::VoiceExtraNumber fugueVoice##number##NoteProb{                                         \
+	    STRING_FOR_FUGUE_NOTE_PROB, index, deluge::fugue::Extra::NOTE_PROBABILITY, "Note"};                            \
+	PLACE_SDRAM_BSS fugue_menu::VoiceExtraNumber fugueVoice##number##VeloSpread{                                       \
+	    STRING_FOR_FUGUE_VELO_SPREAD, index, deluge::fugue::Extra::VELOCITY_SPREAD, "Velo"};                           \
+	PLACE_SDRAM_BSS fugue_menu::VoiceExtraNumber fugueVoice##number##BassProb{                                         \
+	    STRING_FOR_FUGUE_BASS_PROB, index, deluge::fugue::Extra::BASS_PROBABILITY, "Bass"};                            \
+	/* Four pages of four: offsets (2 pages), arp, randomizer */                                                       \
+	PLACE_SDRAM_BSS HorizontalMenu fugueVoice##number##Menu {                                                          \
+		STRING_FOR_FUGUE_VOICE_##number,                                                                               \
+		    {&fugueVoice##number##On,      &fugueVoice##number##Pitch,     &fugueVoice##number##Octave,                \
+		     &fugueVoice##number##Invert,  &fugueVoice##number##Direction, &fugueVoice##number##Rotate,                \
+		     &fugueVoice##number##Tempo,   &fugueVoice##number##Reso,      &fugueVoice##number##ArpMode,               \
+		     &fugueVoice##number##ArpSync, &fugueVoice##number##ArpGate,   &fugueVoice##number##ArpRhythm,             \
+		     &fugueVoice##number##Lock,    &fugueVoice##number##NoteProb,  &fugueVoice##number##VeloSpread,            \
+		     &fugueVoice##number##BassProb},                                                                           \
+		    HorizontalMenu::Layout::FIXED                                                                              \
+	}
+
+DEFINE_FUGUE_VOICE_MENU(2, 0);
+DEFINE_FUGUE_VOICE_MENU(3, 1);
+DEFINE_FUGUE_VOICE_MENU(4, 2);
+#undef DEFINE_FUGUE_VOICE_MENU
+
+PLACE_SDRAM_BSS fugue_menu::Root fugueMenu{STRING_FOR_FUGUE,
+                                           {
+                                               &fugueDestinationMenu,
+                                               &fugueVoice2Menu,
+                                               &fugueVoice3Menu,
+                                               &fugueVoice4Menu,
+                                               &fugueRandomizeMenu,
+                                               &fugueApplyMenu,
+                                           }};
 
 // Global FX Menu
 
@@ -1522,6 +1583,7 @@ PLACE_SDRAM_BSS Submenu soundEditorRootMenu{
         &soundMasterMenu,
         &arpMenu,
         &randomizerMenu,
+        &fugueMenu,
         &audioCompMenu,
         &soundFiltersMenu,
         &soundFXMenu,
@@ -1701,6 +1763,7 @@ PLACE_SDRAM_BSS menu_item::Submenu soundEditorRootMenuMIDIOrCV{
         &midiProgramMenu,
         &arpMenuMIDIOrCV,
         &randomizerMenu,
+        &fugueMenu,
         &bendMenu,
         &cv2SourceMenu,
         &mpeyToModWheelMenu,

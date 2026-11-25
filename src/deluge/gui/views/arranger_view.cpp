@@ -200,6 +200,31 @@ ActionResult ArrangerView::buttonAction(deluge::hid::Button b, bool on, bool inC
 
 	OutputType newOutputType;
 
+	// Holding the second arranger loop and pressing <> couples it to the first loop again - but only once the loop's
+	// pad is let go (see loopLanePadReleased()).
+	if (b == X_ENC && on && isNoUIModeActive() && loopLaneHeldLane == 1 && isHoldingLoopLane()) {
+		loopLaneRecouplePending = true;
+		return ActionResult::DEALT_WITH;
+	}
+
+	// Holding the second arranger loop and pressing BACK sets its FX settings back to the song's own.
+	// This goes by any pad at all being down on the second loop's lane, and comes before everything else BACK does -
+	// in particular <> + BACK, which clears the whole arrangement.
+	if (b == BACK && isAnyPadDownOnLoopLane(1)) {
+		if (on) {
+			if (inCardRoutine) {
+				return ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE;
+			}
+			currentSong->resetArrangerLoop2Fx();
+			updateLoop2Fx(); // If they're in force right now, that starts over from the song's settings
+			view.setKnobIndicatorLevels();
+			loopLaneRecouplePending = false;
+			loopLaneHoldUsed = true;
+			display->displayPopup(display->haveOLED() ? "Loop 2 FX reset" : "RSET");
+		}
+		return ActionResult::DEALT_WITH;
+	}
+
 	// Song button
 	if (b == SESSION_VIEW) {
 		if (on) {
@@ -505,6 +530,10 @@ void ArrangerView::clearArrangement() {
 		}
 	}
 
+	// The arranger loop goes too
+	currentSong->resetArrangerLoop();
+	loopMarkerSelected = LoopMarker::NONE;
+
 	uiNeedsRendering(this, 0xFFFFFFFF, 0);
 }
 
@@ -512,6 +541,8 @@ bool ArrangerView::opened() {
 	automationView.onArrangerView = false;
 
 	mustRedrawTickSquares = true;
+	loopMarkerSelected = LoopMarker::NONE;
+	loopLaneHeldX = -1;
 
 	focusRegained();
 
@@ -612,8 +643,14 @@ bool ArrangerView::renderSidebar(uint32_t whichRows, RGB image[][kDisplayWidth +
 void ArrangerView::drawMuteSquare(int32_t yDisplay, RGB thisImage[]) {
 	RGB& thisColour = thisImage[kDisplayWidth];
 
+	// Arranger loop lane - green when looping, "muted" colour when not
+	if (int32_t loopLane = getLoopLaneFromYDisplay(yDisplay); loopLane != -1) {
+		thisColour = currentSong->isArrangerLoopOn(loopLane) ? menu_item::activeColourMenu.getRGB()
+		                                                     : menu_item::mutedColourMenu.getRGB();
+	}
+
 	// If no Instrument, black
-	if (!outputsOnScreen[yDisplay]) {
+	else if (!outputsOnScreen[yDisplay]) {
 		thisColour = colours::black;
 	}
 
@@ -915,6 +952,12 @@ doNewPress:
 				}
 
 				outputsOnScreen[yPressedEffective] = output;
+
+				// The new Output may have taken the arranger loop lane's row, pushing the lane down one
+				if (runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::ArrangerLoop)) {
+					mustRedrawTickSquares = true;
+					requestRendering(ui);
+				}
 			}
 
 			currentUIMode = UI_MODE_HOLDING_ARRANGEMENT_ROW_AUDITION;
@@ -992,6 +1035,11 @@ ActionResult ArrangerView::padAction(int32_t x, int32_t y, int32_t velocity) {
 ActionResult ArrangerView::handleEditPadAction(int32_t x, int32_t y, int32_t velocity) {
 	Output* output = outputsOnScreen[y];
 
+	// Arranger loop lane - pad that was being held has been let go
+	if (velocity == 0 && x == loopLaneHeldX && y == loopLaneHeldY) {
+		loopLanePadReleased();
+	}
+
 	if (currentUIMode == UI_MODE_HOLDING_ARRANGEMENT_ROW_AUDITION) {
 		if (velocity != 0) {
 			// NAME shortcut
@@ -1011,12 +1059,26 @@ ActionResult ArrangerView::handleEditPadAction(int32_t x, int32_t y, int32_t vel
 		if (output) {
 			editPadAction(x, y, velocity);
 		}
+		// Arranger loop lane
+		else if (int32_t loopLane = getLoopLaneFromYDisplay(y); loopLane != -1) {
+			if (velocity != 0 && currentUIMode == UI_MODE_NONE) {
+				loopLanePadAction(loopLane, x, y);
+			}
+		}
 	}
 	return ActionResult::DEALT_WITH;
 }
 
 ActionResult ArrangerView::handleStatusPadAction(int32_t y, int32_t velocity, UI* ui) {
 	Output* output = outputsOnScreen[y];
+
+	// Arranger loop lane - its "mute" pad switches looping on and off
+	if (int32_t loopLane = getLoopLaneFromYDisplay(y); loopLane != -1) {
+		if (velocity != 0 && currentUIMode == UI_MODE_NONE) {
+			loopLaneStatusPadAction(loopLane, y, ui);
+		}
+		return ActionResult::DEALT_WITH;
+	}
 
 	if (!output) {
 		return ActionResult::DEALT_WITH;
@@ -1149,6 +1211,21 @@ regularMutePadPress:
 
 ActionResult ArrangerView::handleAuditionPadAction(int32_t y, int32_t velocity, UI* ui) {
 	Output* output = outputsOnScreen[y];
+
+	// Arranger loop lane - there's nothing to audition, and pressing here mustn't create a new Output like it would on
+	// an empty row. A release still has to get through if it's the end of a press which began before the lane moved
+	// to this row (which happens when that press created a new Output).
+	if (int32_t loopLane = getLoopLaneFromYDisplay(y); loopLane != -1) {
+		bool isReleaseOfHeldPad =
+		    (velocity == 0 && currentUIMode == UI_MODE_HOLDING_ARRANGEMENT_ROW_AUDITION && y == yPressedActual);
+		if (!isReleaseOfHeldPad) {
+			// Tracks show their name when you press here, so say what this row is
+			if (velocity != 0) {
+				displayLoopLaneName(loopLane);
+			}
+			return ActionResult::DEALT_WITH;
+		}
+	}
 
 	switch (currentUIMode) {
 	case UI_MODE_MIDI_LEARN:
@@ -2245,6 +2322,12 @@ bool ArrangerView::renderRow(ModelStack* modelStack, int32_t yDisplay, int32_t x
 
 	Output* output = outputsOnScreen[yDisplay];
 
+	// Arranger loop lane
+	if (int32_t loopLane = getLoopLaneFromYDisplay(yDisplay); loopLane != -1) {
+		renderLoopLane(loopLane, xScroll, xZoom, imageThisRow, renderWidth);
+		return true;
+	}
+
 	if (!output) {
 
 		const RGB* imageEnd = imageThisRow + renderWidth;
@@ -2312,6 +2395,558 @@ bool ArrangerView::renderRow(ModelStack* modelStack, int32_t yDisplay, int32_t x
 	}
 
 	return true;
+}
+
+// The arranger loop lanes sit directly below the bottom-most Output, and scroll up and down along with the Outputs.
+// Lane 0 (community feature "Arranger Loop") comes first, then lane 1 ("Arranger Loop 2+FX") below it.
+// Returns the row the lane is on - which may well be off the screen, and always is if its feature is switched off.
+int32_t ArrangerView::getLoopLaneYDisplay(int32_t lane) {
+	if (!currentSong || !runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::ArrangerLoop)) {
+		return -1;
+	}
+	if (lane && !runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::ArrangerLoop2Fx)) {
+		return -1;
+	}
+	return -1 - lane - currentSong->arrangementYScroll;
+}
+
+// "Loop" for the first loop, "Loop FX" for the second
+void ArrangerView::displayLoopLaneName(int32_t lane) {
+	if (lane) {
+		display->displayPopup(display->haveOLED() ? "Loop FX" : "LPFX");
+	}
+	else {
+		display->displayPopup(deluge::l10n::get(deluge::l10n::String::STRING_FOR_LOOP));
+	}
+}
+
+// Which loop lane is on this row of the screen, or -1 if none
+int32_t ArrangerView::getLoopLaneFromYDisplay(int32_t yDisplay) {
+	for (int32_t lane = 0; lane < 2; lane++) {
+		if (yDisplay == getLoopLaneYDisplay(lane)) {
+			return lane;
+		}
+	}
+	return -1;
+}
+
+// Loop region in yellow (or purple for the second loop), with point A (start) in green and point B (end) in red.
+// B is drawn on the last square that's still inside the loop.
+void ArrangerView::renderLoopLane(int32_t lane, int32_t xScroll, uint32_t xZoom, RGB* image, int32_t renderWidth) {
+	int32_t loopStart = currentSong->getArrangerLoopStart(lane);
+	int32_t loopEnd = currentSong->getArrangerLoopEnd(lane);
+
+	RGB startColour = colours::green;
+	RGB endColour = colours::red;
+	RGB fullBodyColour = lane ? RGB(128, 0, 255) : colours::yellow;
+	RGB bodyColour = fullBodyColour.dim(2);
+
+	// Lane "muted" - not looping
+	if (!currentSong->isArrangerLoopOn(lane)) {
+		startColour = startColour.dull();
+		endColour = endColour.dull();
+		bodyColour = fullBodyColour.dim(4);
+	}
+
+	// Second loop lights up fully while its FX settings are the ones you're hearing
+	else if (lane && currentSong->arrangerLoop2FxEngaged) {
+		bodyColour = fullBodyColour;
+	}
+
+	bool markerSelectedHere = (loopMarkerSelected != LoopMarker::NONE && loopMarkerSelectedLane == lane);
+
+	int32_t squareStartPos = getPosFromSquare(0, xScroll, xZoom);
+
+	for (int32_t xDisplay = 0; xDisplay < renderWidth; xDisplay++) {
+		int32_t squareEndPos = getPosFromSquare(xDisplay + 1, xScroll, xZoom);
+
+		bool hasStart = (loopStart >= squareStartPos && loopStart < squareEndPos);
+		bool hasEnd = (loopEnd > loopStart && loopEnd > squareStartPos && loopEnd <= squareEndPos);
+
+		RGB colour = colours::black;
+
+		// If zoomed out so far that both markers share a square, show A - unless B is the one being placed
+		if (hasStart && !(hasEnd && markerSelectedHere && loopMarkerSelected == LoopMarker::END)) {
+			if (!markerSelectedHere || loopMarkerSelected != LoopMarker::START || loopMarkerBlinkOn) {
+				colour = startColour;
+			}
+		}
+		else if (hasEnd) {
+			if (!markerSelectedHere || loopMarkerSelected != LoopMarker::END || loopMarkerBlinkOn) {
+				colour = endColour;
+			}
+		}
+		else if (squareStartPos > loopStart && squareStartPos < loopEnd) {
+			colour = bodyColour;
+		}
+
+		image[xDisplay] = colour;
+		squareStartPos = squareEndPos;
+	}
+}
+
+// Tap a marker and it blinks, like the end marker in audio clip view. Then tap anywhere else in the lane to put it
+// there, or tap it again to leave it where it is.
+// With no marker blinking, a pad inside the loop can also be held down: PLAY then starts from point A (see
+// PlaybackHandler), turning <> moves the whole loop (see horizontalEncoderAction()), and tapping a pad to the left or
+// right of the loop makes it jump there by its own length.
+// The second loop (lane 1) also: uses its own song FX settings for as long as it's held (see updateLoop2Fx()), latches
+// those with SHIFT + tap, and gets coupled to the first loop again with a press of <> while held (see buttonAction()).
+void ArrangerView::loopLanePadAction(int32_t lane, int32_t x, int32_t y) {
+	bool shiftPressed = (lane && Buttons::isShiftButtonPressed());
+
+	int32_t xScroll = currentSong->xScroll[NAVIGATION_ARRANGEMENT];
+	int32_t squareStart = getPosFromSquare(x, xScroll);
+	int32_t squareEnd = getPosFromSquare(x + 1, xScroll);
+
+	if (squareStart < 0 || squareEnd <= squareStart) {
+		if (shiftPressed) {
+			toggleLoop2FxLatch();
+		}
+		return;
+	}
+
+	int32_t loopStart = currentSong->getArrangerLoopStart(lane);
+	int32_t loopEnd = currentSong->getArrangerLoopEnd(lane);
+	int32_t loopEndAsSet = currentSong->getArrangerLoopEndAsSet(lane); // 0 if B's never been placed
+	int32_t loopLength = loopEnd - loopStart; // 0 if there's no loop region - an empty arrangement and B never placed
+
+	bool onStart = (loopStart >= squareStart && loopStart < squareEnd);
+	bool onEnd = (loopLength > 0 && loopEnd > squareStart && loopEnd <= squareEnd);
+	bool insideLoop = (loopLength > 0 && squareEnd > loopStart && squareStart < loopEnd);
+
+	// Second loop - with one of its two marker pads held down, another pad inside the loop starts a fade of its FX
+	// settings. Holding A fades them in, holding B fades them out. The other pad sets how long that takes: the
+	// other marker's pad means the length of the loop, and otherwise it's a bar per pad counted from the held one,
+	// up to 4.
+	// With SHIFT, the fade also latches, and starts over each time the loop comes round.
+	if (lane && insideLoop && loopLaneHeldLane == 1 && loopLanePressedMarker != LoopMarker::NONE && x != loopLaneHeldX
+	    && isLoopLanePadDown()) {
+		bool fadeOut = (loopLanePressedMarker == LoopMarker::END);
+		int32_t numBars = 0; // 0 means the length of the loop
+		bool valid = fadeOut ? onStart : onEnd;
+		if (!valid) {
+			numBars = fadeOut ? (loopLaneHeldX - x) : (x - loopLaneHeldX);
+			valid = (numBars >= 1 && numBars <= 4);
+		}
+		if (valid) {
+			int32_t lengthTicks = numBars ? (numBars * (int32_t)currentSong->getBarLength()) : loopLength;
+			startLoop2Fade(fadeOut, numBars, lengthTicks, shiftPressed);
+		}
+		loopLaneHoldUsed = true;
+		return;
+	}
+
+	// Second loop, with SHIFT - latch its FX settings on or off.
+	// Except on a marker's pad, where this might be the start of SHIFT + A + another pad, above. So there, just
+	// start holding, and do the latching once the pad's let go if nothing else got pressed - see
+	// loopLanePadReleased().
+	if (shiftPressed) {
+		if (insideLoop && (onStart || onEnd) && !isLoopLanePadDown()) {
+			loopLaneHeldX = x;
+			loopLaneHeldY = y;
+			loopLaneHeldLane = lane;
+			loopLaneHoldUsed = false;
+			loopLaneRecouplePending = false;
+			loopLaneShiftTap = true;
+			loopLanePressedMarker = onStart ? LoopMarker::START : LoopMarker::END;
+			lastInteractedArrangementPos = loopStart;
+		}
+		else {
+			toggleLoop2FxLatch();
+		}
+		return;
+	}
+
+	// A marker blinking on the other lane doesn't concern this one
+	LoopMarker markerSelectedHere = (loopMarkerSelectedLane == lane) ? loopMarkerSelected : LoopMarker::NONE;
+
+	switch (markerSelectedHere) {
+	case LoopMarker::NONE:
+		// Inside the loop - start holding it. If this is a marker's pad, the marker only starts blinking once the
+		// pad is let go, and only if the hold wasn't used for PLAY or <> in the meantime - see loopLanePadReleased()
+		if (insideLoop) {
+			// Unless a loop's already being held with another pad
+			if (!isHoldingLoopLane()) {
+				loopLaneHeldX = x;
+				loopLaneHeldY = y;
+				loopLaneHeldLane = lane;
+				loopLaneHoldUsed = false;
+				loopLaneRecouplePending = false;
+				loopLaneShiftTap = false;
+				loopLanePressedMarker = onStart ? LoopMarker::START : (onEnd ? LoopMarker::END : LoopMarker::NONE);
+				lastInteractedArrangementPos = loopStart; // Where PLAY will start from
+				updateLoop2Fx();
+				displayLoopLaneName(lane);
+			}
+			return;
+		}
+
+		// Outside the loop. If the loop's being held, it jumps over to this side: to directly before where it was if
+		// the tap is to its left, or directly after if to its right. Otherwise, nothing to do.
+		if (loopLength > 0) {
+			if (loopLaneHeldLane == lane && isHoldingLoopLane()) {
+				shiftLoop(lane, (squareStart >= loopEnd) ? loopLength : -loopLength);
+			}
+			return;
+		}
+
+		// No loop region, which means an empty arrangement and B never placed
+		if (onStart) {
+			loopMarkerSelected = LoopMarker::START;
+			loopMarkerSelectedLane = lane;
+		}
+		// There's no B to grab, so just let them place it
+		else if (squareStart > loopStart) {
+			currentSong->setArrangerLoopPoints(lane, loopStart, squareEnd);
+		}
+		break;
+
+	case LoopMarker::START:
+		if (onStart) {
+			// If both markers share this square, a second tap gets you B
+			loopMarkerSelected = onEnd ? LoopMarker::END : LoopMarker::NONE;
+		}
+		else if (onEnd) {
+			loopMarkerSelected = LoopMarker::END;
+		}
+		else {
+			// A placed at or after B - B moves along, keeping the loop the same length
+			if (loopLength > 0 && squareStart >= loopEnd) {
+				if (squareStart > kMaxSequenceLength - loopLength) {
+					return;
+				}
+				loopEndAsSet = squareStart + loopLength;
+			}
+			currentSong->setArrangerLoopPoints(lane, squareStart, loopEndAsSet);
+			loopMarkerSelected = LoopMarker::NONE; // Placed
+		}
+		break;
+
+	case LoopMarker::END:
+		if (onEnd) {
+			loopMarkerSelected = LoopMarker::NONE;
+		}
+		else if (onStart) {
+			loopMarkerSelected = LoopMarker::START;
+		}
+		else {
+			// B placed at or before A - A moves along, keeping the loop the same length if there's room
+			if (squareEnd <= loopStart) {
+				int32_t newLength = std::max(loopLength, squareEnd - squareStart);
+				loopStart = std::max(0_i32, squareEnd - newLength);
+			}
+			currentSong->setArrangerLoopPoints(lane, loopStart, squareEnd);
+			loopMarkerSelected = LoopMarker::NONE; // Placed
+		}
+		break;
+	}
+
+	loopMarkerBlinkOn = true;
+	loopPointsChanged();
+}
+
+// The pad that was holding a loop has been let go. If it was just a tap on a marker, that marker now starts blinking
+void ArrangerView::loopLanePadReleased() {
+	// SHIFT + tap on one of the second loop's marker pads, and nothing else got pressed meanwhile - latch
+	if (loopLaneShiftTap) {
+		if (!loopLaneHoldUsed) {
+			toggleLoop2FxLatch();
+		}
+	}
+	else if (loopLanePressedMarker != LoopMarker::NONE && !loopLaneHoldUsed) {
+		loopMarkerSelected = loopLanePressedMarker;
+		loopMarkerSelectedLane = loopLaneHeldLane;
+		loopMarkerBlinkOn = true;
+		loopPointsChanged();
+	}
+
+	// <> got pressed while the second loop was held - couple it to the first loop again, now that it's been let go
+	if (loopLaneRecouplePending && loopLaneHeldLane == 1) {
+		if (!currentSong->arrangerLoop2Coupled) {
+			currentSong->arrangerLoop2Coupled = true;
+			loopPointsChanged();
+		}
+		display->displayPopup(display->haveOLED() ? "Loop 2 coupled" : "COUP");
+	}
+
+	loopLaneHeldX = -1;
+	loopLanePressedMarker = LoopMarker::NONE;
+	loopLaneRecouplePending = false;
+	loopLaneShiftTap = false;
+
+	updateLoop2Fx(); // Second loop's FX settings fall back to the song's, unless latched
+}
+
+// Latches the second loop's FX settings on or off
+void ArrangerView::toggleLoop2FxLatch() {
+	if (currentSong->arrangerLoop2FxLatched) {
+		currentSong->arrangerLoop2FxLatched = false;
+		display->displayPopup(display->haveOLED() ? "Loop 2 FX unlatched" : "OFF");
+	}
+	else if (!currentSong->arrangerLoop2On) {
+		display->displayPopup(display->haveOLED() ? "Loop 2 is muted" : "MUTE");
+	}
+	else if (!currentSong->affectEntire) {
+		display->displayPopup(display->haveOLED() ? "Needs affect-entire" : "AFEN");
+	}
+	else {
+		currentSong->arrangerLoop2FxLatched = true;
+		display->displayPopup(display->haveOLED() ? "Loop 2 FX latched" : "LTCH");
+	}
+	updateLoop2Fx();
+}
+
+// Starts fading the second loop's FX settings in (from the song's own settings) or out (back to them).
+// numBars is only for the display - 0 means the length of the loop.
+void ArrangerView::startLoop2Fade(bool fadeOut, int32_t numBars, int32_t lengthTicks, bool latchAndRepeat) {
+	if (!currentSong->arrangerLoop2On) {
+		display->displayPopup(display->haveOLED() ? "Loop 2 is muted" : "MUTE");
+		return;
+	}
+	if (!currentSong->affectEntire) {
+		display->displayPopup(display->haveOLED() ? "Needs affect-entire" : "AFEN");
+		return;
+	}
+
+	if (latchAndRepeat) {
+		currentSong->arrangerLoop2FxLatched = true;
+	}
+
+	loop2Fade = fadeOut ? Loop2Fade::OUT : Loop2Fade::IN;
+	loop2FadeRepeat = latchAndRepeat;
+	loop2FadeFromHold = true;
+	loop2FadeStartSample = AudioEngine::audioSampleTimer;
+	loop2FadeLengthSamples =
+	    std::max<uint32_t>(1, (uint32_t)((float)lengthTicks * playbackHandler.getTimePerInternalTickFloat()));
+	loop2FadeLastLivePos = arrangement.hasPlaybackActive() ? arrangement.getLivePos() : 0;
+
+	// A fade-out begins from the second loop's settings in full, so if they weren't engaged, they are now.
+	// All of this happens in one go, so nothing's heard of the in-between steps.
+	currentSong->setArrangerLoop2FxEngaged(true);
+	currentSong->beginArrangerLoop2FxFade();
+	currentSong->setArrangerLoop2FxFadeAmount(fadeOut ? 65536 : 0);
+
+	if (display->haveOLED()) {
+		DEF_STACK_STRING_BUF(popupMsg, 40);
+		popupMsg.append(fadeOut ? "FX fade out: " : "FX fade in: ");
+		if (numBars) {
+			popupMsg.appendInt(numBars);
+			popupMsg.append(numBars == 1 ? " bar" : " bars");
+		}
+		else {
+			popupMsg.append("loop");
+		}
+		if (latchAndRepeat) {
+			popupMsg.append(", repeat");
+		}
+		display->displayPopup(popupMsg.c_str());
+	}
+	else {
+		char popupMsg[5] = "IN  ";
+		if (fadeOut) {
+			popupMsg[0] = 'O';
+			popupMsg[1] = 'U';
+			popupMsg[2] = 'T';
+		}
+		popupMsg[3] = numBars ? ('0' + numBars) : 'L';
+		display->displayPopup(popupMsg);
+	}
+
+	updateLoop2Fx();
+	view.setKnobIndicatorLevels();
+
+	int32_t laneY = getLoopLaneYDisplay(1);
+	if (laneY >= 0 && laneY < kDisplayHeight) {
+		uiNeedsRendering(this, 1 << laneY, 0);
+	}
+}
+
+// A lane's "mute" pad. Only one of the two loops can be on at a time.
+void ArrangerView::loopLaneStatusPadAction(int32_t lane, int32_t y, UI* ui) {
+	currentSong->setArrangerLoopOn(lane, !currentSong->isArrangerLoopOn(lane));
+
+	updateLoop2Fx(); // Muting the second loop, or unmuting the first, makes its FX settings fall back to the song's
+	loopPointsChanged();
+
+	// May have been called for performance view or arranger automation view, which only show our sidebar.
+	// All rows, because the other lane's pad may have changed too.
+	uiNeedsRendering(ui, 0, 0xFFFFFFFF);
+}
+
+// Whether any pad at all is physically down on this loop's lane
+bool ArrangerView::isAnyPadDownOnLoopLane(int32_t lane) {
+	int32_t laneY = getLoopLaneYDisplay(lane);
+	if (getCurrentUI() != this || laneY < 0 || laneY >= kDisplayHeight) {
+		return false;
+	}
+	for (int32_t x = 0; x < kDisplayWidth; x++) {
+		if (matrixDriver.isPadPressed(x, laneY)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Whether the pad that began holding a loop is still physically down
+bool ArrangerView::isLoopLanePadDown() {
+	return (loopLaneHeldX >= 0 && getCurrentUI() == this && loopLaneHeldY == getLoopLaneYDisplay(loopLaneHeldLane)
+	        && matrixDriver.isPadPressed(loopLaneHeldX, loopLaneHeldY));
+}
+
+// Whether a pad inside a loop region is being held down right now. Whoever asks is about to act on that hold
+// (PLAY from point A, or moving the loop), so if it began on a marker's pad, letting go won't make the marker blink.
+bool ArrangerView::isHoldingLoopLane() {
+	bool holding = isLoopLanePadDown();
+	if (holding) {
+		loopLaneHoldUsed = true;
+	}
+	return holding;
+}
+
+// Decides whether the second loop's own song FX settings should be the ones in force right now, and swaps them in or
+// out if that's changed. They're in force while the second loop is switched on, affect-entire is on, and either: a pad
+// in the loop's body is being held, a fade's been started from one of its marker pads and that pad's still held, or
+// they've been latched. Muting the second loop, or unmuting the first, releases a latch.
+// Also moves along any fade that's underway (see startLoop2Fade()).
+// Gets called regularly, as well as right after anything which might change the answer.
+void ArrangerView::updateLoop2Fx() {
+	if (!currentSong || sdRoutineLock) {
+		return;
+	}
+
+	bool available = runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::ArrangerLoop)
+	                 && runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::ArrangerLoop2Fx)
+	                 && currentSong->arrangerLoop2On && currentSong->affectEntire;
+
+	if (!available) {
+		currentSong->arrangerLoop2FxLatched = false;
+	}
+
+	bool padDown = (loopLaneHeldLane == 1 && isLoopLanePadDown());
+	if (!padDown) {
+		loop2FadeFromHold = false;
+	}
+
+	// The two marker pads don't engage anything by themselves - they're what fades get started from
+	bool bodyHeld = (padDown && loopLanePressedMarker == LoopMarker::NONE);
+
+	bool shouldBeEngaged = available && (currentSong->arrangerLoop2FxLatched || bodyHeld || loop2FadeFromHold);
+
+	// Letting go ends a fade right there, unless latched. And saving the song can end one behind our back.
+	if (loop2Fade != Loop2Fade::NONE && (!shouldBeEngaged || !currentSong->arrangerLoop2FxFading)) {
+		loop2Fade = Loop2Fade::NONE;
+		loop2FadeRepeat = false;
+	}
+
+	if (shouldBeEngaged != currentSong->arrangerLoop2FxEngaged) {
+		currentSong->setArrangerLoop2FxEngaged(shouldBeEngaged);
+
+		// The gold knobs' values just changed under the user's fingers
+		view.setKnobIndicatorLevels();
+
+		int32_t laneY = getLoopLaneYDisplay(1);
+		if (laneY >= 0 && laneY < kDisplayHeight) {
+			uiNeedsRendering(this, 1 << laneY, 0);
+		}
+	}
+
+	if (loop2Fade == Loop2Fade::NONE) {
+		return;
+	}
+
+	// A repeating fade starts over each time the play-head comes back round to the start of the loop
+	if (loop2FadeRepeat && arrangement.hasPlaybackActive()) {
+		int32_t livePos = arrangement.getLivePos();
+		if (livePos < loop2FadeLastLivePos) {
+			loop2FadeStartSample = AudioEngine::audioSampleTimer;
+		}
+		loop2FadeLastLivePos = livePos;
+	}
+
+	uint32_t elapsed = AudioEngine::audioSampleTimer - loop2FadeStartSample;
+
+	// Still underway
+	if (elapsed < loop2FadeLengthSamples) {
+		int32_t amount = ((uint64_t)elapsed << 16) / loop2FadeLengthSamples;
+		currentSong->setArrangerLoop2FxFadeAmount((loop2Fade == Loop2Fade::OUT) ? (65536 - amount) : amount);
+	}
+
+	// Faded all the way in
+	else if (loop2Fade == Loop2Fade::IN) {
+		if (loop2FadeRepeat) {
+			currentSong->setArrangerLoop2FxFadeAmount(65536); // And wait here til the loop comes round
+		}
+		else {
+			currentSong->endArrangerLoop2FxFade();
+			loop2Fade = Loop2Fade::NONE;
+		}
+	}
+
+	// Faded all the way out, and repeating - wait here, at the song's own settings, til the loop comes round
+	else if (loop2FadeRepeat) {
+		currentSong->setArrangerLoop2FxFadeAmount(0);
+	}
+
+	// Faded all the way out - we're at the song's own settings, and that's the end of any latch.
+	// If the pad's still held, it stays like this until that's let go.
+	else {
+		currentSong->setArrangerLoop2FxFadeAmount(0);
+		currentSong->arrangerLoop2FxLatched = false;
+		if (!loop2FadeFromHold) {
+			loop2Fade = Loop2Fade::NONE;
+			currentSong->setArrangerLoop2FxEngaged(false);
+			view.setKnobIndicatorLevels();
+
+			int32_t laneY = getLoopLaneYDisplay(1);
+			if (laneY >= 0 && laneY < kDisplayHeight) {
+				uiNeedsRendering(this, 1 << laneY, 0);
+			}
+		}
+	}
+}
+
+// Moves a whole loop left (negative) or right by this many ticks, keeping its length
+void ArrangerView::shiftLoop(int32_t lane, int32_t shift) {
+	int32_t loopStart = currentSong->getArrangerLoopStart(lane);
+	int32_t loopEnd = currentSong->getArrangerLoopEnd(lane);
+	if (loopEnd <= loopStart) {
+		return;
+	}
+
+	int32_t xZoom = currentSong->xZoom[NAVIGATION_ARRANGEMENT];
+	shift = std::max(shift, -loopStart); // Not past the start of the arrangement
+
+	if (!shift || (shift > 0 && loopEnd > kMaxSequenceLength - shift)) {
+		return;
+	}
+
+	currentSong->setArrangerLoopPoints(lane, loopStart + shift, loopEnd + shift);
+	lastInteractedArrangementPos = loopStart + shift; // Where PLAY will start from
+	loopLaneRecouplePending = false;                  // Moving it on purpose outranks an earlier press of <>
+
+	// Show where point A is now
+	displayNumberOfBarsAndBeats(loopStart + shift, xZoom, true, "FAR");
+
+	loopPointsChanged();
+}
+
+void ArrangerView::loopPointsChanged() {
+	// Get the play-head to take notice of the new loop points right away, rather than at whatever
+	// point it was next due to come back
+	if (arrangement.hasPlaybackActive()) {
+		playbackHandler.expectEvent();
+	}
+
+	mustRedrawTickSquares = true;
+
+	// Both lanes, since the second one follows the first while they're coupled
+	for (int32_t lane = 0; lane < 2; lane++) {
+		int32_t laneY = getLoopLaneYDisplay(lane);
+		if (laneY >= 0 && laneY < kDisplayHeight) {
+			uiNeedsRendering(this, 1 << laneY, 0);
+		}
+	}
 }
 
 // Lock rendering before calling this
@@ -2729,6 +3364,13 @@ static const uint32_t horizontalEncoderScrollUIModes[] = {UI_MODE_HOLDING_ARRANG
 
 ActionResult ArrangerView::horizontalEncoderAction(int32_t offset) {
 
+	// Arranger loop lane - holding a pad inside the loop and turning moves the whole loop
+	if (isNoUIModeActive() && isHoldingLoopLane()) {
+		// One square of the current zoom level per click
+		shiftLoop(loopLaneHeldLane, offset * static_cast<int32_t>(currentSong->xZoom[NAVIGATION_ARRANGEMENT]));
+		return ActionResult::DEALT_WITH;
+	}
+
 	// Encoder button pressed...
 	if (isUIModeActiveExclusively(UI_MODE_HOLDING_HORIZONTAL_ENCODER_BUTTON)) {
 
@@ -2943,7 +3585,14 @@ ActionResult ArrangerView::horizontalScrollOneSquare(int32_t direction) {
 	}
 
 	// Calculate max scroll bounds
-	int32_t max_scroll = static_cast<int32_t>(getMaxLength()) - 1 + static_cast<int32_t>(xZoom);
+	int32_t max_length = static_cast<int32_t>(getMaxLength());
+
+	// Arranger loop - point B may have been placed beyond the last ClipInstance, and must stay reachable by scrolling
+	if (runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::ArrangerLoop)) {
+		max_length = std::max({max_length, currentSong->arrangerLoopEnd, currentSong->arrangerLoop2End});
+	}
+
+	int32_t max_scroll = max_length - 1 + static_cast<int32_t>(xZoom);
 	int32_t screen_width = static_cast<int32_t>(xZoom) << kDisplayWidthMagnitude;
 	max_scroll = std::clamp(max_scroll, int32_t{0}, kMaxSequenceLength - screen_width);
 
@@ -3139,6 +3788,24 @@ void ArrangerView::graphicsRoutine() {
 		sessionView.displayPotentialTempoChange(this);
 	}
 
+	int32_t loopLaneY = getLoopLaneYDisplay(loopMarkerSelectedLane);
+
+	// Arranger loop lane - blink the marker that's waiting to be placed
+	if (loopMarkerSelected != LoopMarker::NONE) {
+		if (!runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::ArrangerLoop)) {
+			loopMarkerSelected = LoopMarker::NONE;
+		}
+		else {
+			bool newBlinkOn = !((AudioEngine::audioSampleTimer >> 13) & 1); // Flips about every 190ms
+			if (newBlinkOn != loopMarkerBlinkOn) {
+				loopMarkerBlinkOn = newBlinkOn;
+				if (ui == this && currentUIMode == UI_MODE_NONE && loopLaneY >= 0 && loopLaneY < kDisplayHeight) {
+					uiNeedsRendering(this, 1 << loopLaneY, 0);
+				}
+			}
+		}
+	}
+
 	if (PadLEDs::flashCursor != FLASH_CURSOR_OFF) {
 
 		int32_t newTickSquare;
@@ -3201,6 +3868,12 @@ void ArrangerView::graphicsRoutine() {
 				        : newTickSquare;
 				colours[yDisplay] =
 				    (output && output->recordingInArrangement) ? 2 : (output && output->mutedInArrangementMode ? 1 : 0);
+
+				// Arranger loop lane - "muted" play-cursor colour if not looping
+				if (int32_t loopLane = getLoopLaneFromYDisplay(yDisplay);
+				    loopLane != -1 && !currentSong->isArrangerLoopOn(loopLane)) {
+					colours[yDisplay] = 1;
+				}
 
 				if (arrangement.hasPlaybackActive() && currentUIMode != UI_MODE_EXPLODE_ANIMATION
 				    && currentUIMode != UI_MODE_IMPLODE_ANIMATION) {
@@ -3342,6 +4015,14 @@ void ArrangerView::tellMatrixDriverWhichRowsContainSomethingZoomable() {
 	for (int32_t yDisplay = 0; yDisplay < kDisplayHeight; yDisplay++) {
 		PadLEDs::transitionTakingPlaceOnRow[yDisplay] =
 		    (outputsOnScreen[yDisplay] && outputsOnScreen[yDisplay]->clipInstances.getNumElements());
+	}
+
+	// Arranger loop lanes scroll and zoom along with everything else
+	for (int32_t lane = 0; lane < 2; lane++) {
+		int32_t loopLaneY = getLoopLaneYDisplay(lane);
+		if (loopLaneY >= 0 && loopLaneY < kDisplayHeight) {
+			PadLEDs::transitionTakingPlaceOnRow[loopLaneY] = true;
+		}
 	}
 }
 

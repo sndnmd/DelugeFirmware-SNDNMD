@@ -29,11 +29,13 @@
 #include "model/clip/instrument_clip.h"
 #include "model/instrument/instrument.h"
 #include "model/model_stack.h"
+#include "model/settings/runtime_feature_settings.h"
 #include "model/song/song.h"
 #include "modulation/params/param_manager.h"
 #include "playback/mode/session.h"
 #include "playback/playback_handler.h"
 #include "processing/engines/audio_engine.h"
+#include "processing/stem_export/stem_export.h"
 #include "util/functions.h"
 
 extern "C" {}
@@ -47,6 +49,7 @@ Arrangement::Arrangement() {
 void Arrangement::setupPlayback() {
 
 	currentSong->setParamsInAutomationMode(true);
+	currentSong->arrangerLoopQueuedLane = -1;
 
 	// Rohan: It seems strange that I ever put this here. It's now also in PlaybackHandler::setupPlayback,
 	// so maybe extra unneeded here - but that's not the only place that calls us, so have left it in for now
@@ -108,11 +111,93 @@ bool Arrangement::endPlayback() {
 	return false; // No song swap
 }
 
+// Arranger loop (community feature). Returns whether the arrangement should loop right now, and between which points.
+bool Arrangement::getLoopPoints(int32_t* loopStart, int32_t* loopEnd) {
+	if (!runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::ArrangerLoop)) {
+		return false;
+	}
+
+	// Never loop while recording, resampling or exporting - those need the arrangement to run through and end
+	if (playbackHandler.recording != RecordingMode::OFF || audioRecorder.isCurrentlyResampling()
+	    || stemExport.processStarted) {
+		return false;
+	}
+
+	// Whichever of the two loops is switched on. They can't both be.
+	int32_t lane = 0;
+	if (!currentSong->arrangerLoopOn) {
+		if (!runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::ArrangerLoop2Fx) || !currentSong->arrangerLoop2On) {
+			return false;
+		}
+		lane = 1;
+	}
+
+	*loopStart = currentSong->getArrangerLoopStart(lane);
+	*loopEnd = currentSong->getArrangerLoopEnd(lane);
+	return (*loopEnd > *loopStart);
+}
+
+// Arranger loop - called from doTickForward() when the play-head reaches point B. Moves the play-head without
+// stopping playback, so the clock (and anything synced to it) just keeps running.
+void Arrangement::jumpToLoopStart(int32_t newPos) {
+
+	// Stop everything that's sounding from the arrangement, like when a ClipInstance ends
+	for (Output* output = currentSong->firstOutput; output; output = output->next) {
+		if (!currentSong->isOutputActiveInArrangement(output)) {
+			continue;
+		}
+
+		Clip* clip = output->getActiveClip();
+		if (clip && clip->activeIfNoSolo) {
+			clip->expectNoFurtherTicks(currentSong);
+			clip->activeIfNoSolo = false;
+		}
+	}
+
+	// resetPlayPos() assumes playback is beginning afresh, and tells the arranger view so. Undo that part.
+	int32_t xScrollWhenPlaybackStarted = arrangerView.xScrollWhenPlaybackStarted;
+	bool actionOnDepress = arrangerView.actionOnDepress;
+
+	resetPlayPos(newPos);
+
+	arrangerView.xScrollWhenPlaybackStarted = xScrollWhenPlaybackStarted;
+	arrangerView.actionOnDepress = actionOnDepress;
+
+	// The swung tick count carries on counting up, so keep this relative to it - that's what
+	// PlaybackHandler::getActualArrangementRecordPos() expects
+	playbackStartedAtPos = newPos - (int32_t)playbackHandler.lastSwungTickActioned;
+}
+
 void Arrangement::doTickForward(int32_t posIncrement) {
 
 	bool anyChangeToSessionClipsPlaying = false;
 
 	lastProcessedPos += posIncrement;
+
+	// Arranger loop - if we've just arrived at point B, jump back to point A
+	int32_t loopStart = 0;
+	int32_t loopEnd = 0;
+	bool looping = getLoopPoints(&loopStart, &loopEnd);
+	if (looping && posIncrement > 0 && lastProcessedPos >= loopEnd && lastProcessedPos - posIncrement < loopEnd) {
+		// Normally we land exactly on B. If B got moved to just behind the play-head, carry the overshoot over
+		// so we stay on the beat
+		int32_t overshoot = lastProcessedPos - loopEnd;
+
+		// If the other loop has been queued up (from the grid's sidebar), this is where it takes over
+		if (currentSong->arrangerLoopQueuedLane != -1) {
+			currentSong->setArrangerLoopOn(currentSong->arrangerLoopQueuedLane, true);
+			looping = getLoopPoints(&loopStart, &loopEnd);
+			uiNeedsRendering(&arrangerView, 0xFFFFFFFF, 0xFFFFFFFF);
+		}
+
+		if (looping) {
+			jumpToLoopStart(loopStart + (overshoot % (loopEnd - loopStart)));
+
+			// Everything has just been set up at the new pos, same as for the first, 0-length tick of playback
+			posIncrement = 0;
+			anyChangeToSessionClipsPlaying = true;
+		}
+	}
 
 	char modelStackMemory[MODEL_STACK_MAX_SIZE];
 	ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, currentSong);
@@ -316,6 +401,13 @@ justDoArp:
 	if (anyChangeToSessionClipsPlaying) {
 		// use root UI in case this is called from performance view
 		sessionView.requestRendering(getRootUI(), 0, 0xFFFFFFFF);
+	}
+
+	// Arranger loop - make sure we come back exactly when we reach point B. Has to happen before the check below,
+	// so that we keep playing up to B even if the arrangement has nothing left in it.
+	if (looping && lastProcessedPos < loopEnd) {
+		playbackHandler.swungTicksTilNextEvent =
+		    std::min(playbackHandler.swungTicksTilNextEvent, loopEnd - lastProcessedPos);
 	}
 
 	// If nothing further in the arrangement, we usually just stop playing

@@ -1103,8 +1103,8 @@ enum GridDefaultActiveMode : uint8_t {
 // mapping of grid modes to y axis
 enum GridMode : uint8_t {
 	Unassigned0,
-	Unassigned1,
-	Unassigned2,
+	ARRANGER_LOOP_FX, // Second arranger loop (community feature "Arranger Loop 2+FX")
+	ARRANGER_LOOP,    // First arranger loop (community feature "Arranger Loop")
 	MAGENTA,
 	RED,
 	Unassigned5,

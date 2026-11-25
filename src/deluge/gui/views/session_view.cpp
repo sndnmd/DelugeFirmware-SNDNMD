@@ -279,6 +279,9 @@ ActionResult SessionView::buttonAction(deluge::hid::Button b, bool on, bool inCa
 						display->displayError(error);
 						return ActionResult::DEALT_WITH;
 					}
+					// A newly recorded arrangement gets looped as a whole
+					currentSong->resetArrangerLoop();
+
 					playbackHandler.recording = RecordingMode::ARRANGEMENT;
 					playbackHandler.setupPlaybackUsingInternalClock();
 
@@ -2238,6 +2241,17 @@ void SessionView::graphicsRoutine() {
 	if (currentSong->sessionLayout == SessionLayoutType::SessionLayoutTypeGrid) {
 		potentiallyRenderClipLaunchPlayhead(reallyNoTickSquare, sixteenthNotesRemaining);
 
+		// Arranger loop pads in the sidebar - redraw them whenever they should look different, which includes
+		// blinking while one's waiting to take over
+		uint8_t arrangerLoopPads = (gridArrangerLoopPadLit(0) ? 1 : 0) | (gridArrangerLoopPadLit(1) ? 2 : 0)
+		                           | (gridArrangerLoopPadExists(0) ? 4 : 0) | (gridArrangerLoopPadExists(1) ? 8 : 0);
+		if (arrangerLoopPads != gridArrangerLoopPadsLastRendered) {
+			gridArrangerLoopPadsLastRendered = arrangerLoopPads;
+			if (getCurrentUI() == this) {
+				uiNeedsRendering(this, 0, (1 << GridMode::ARRANGER_LOOP) | (1 << GridMode::ARRANGER_LOOP_FX));
+			}
+		}
+
 		return;
 	}
 
@@ -3356,6 +3370,20 @@ void SessionView::gridRenderActionModes(int32_t y, RGB image[][kDisplayWidth + k
 		}
 		break;
 	}
+	case GridMode::ARRANGER_LOOP: {
+		if (gridArrangerLoopPadExists(0)) {
+			modeActive = gridArrangerLoopPadLit(0);
+			modeColour = colours::yellow;
+		}
+		break;
+	}
+	case GridMode::ARRANGER_LOOP_FX: {
+		if (gridArrangerLoopPadExists(1)) {
+			modeActive = gridArrangerLoopPadLit(1);
+			modeColour = RGB(128, 0, 255); // Purple
+		}
+		break;
+	}
 
 	default: {
 		modeExists = false;
@@ -3944,6 +3972,127 @@ void SessionView::gridToggleClipPlay(Clip* clip, bool instant) {
 	session.toggleClipStatus(clip, nullptr, instant, kInternalButtonPressLatency);
 }
 
+// The grid's sidebar gets a pad per arranger loop (community features): yellow for the first, purple for the second.
+// Pressing one gets the arrangement playing, looping that loop - see gridArrangerLoopPadAction().
+bool SessionView::gridArrangerLoopPadExists(int32_t lane) {
+	if (!runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::ArrangerLoop)) {
+		return false;
+	}
+	return !lane || runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::ArrangerLoop2Fx);
+}
+
+// Whether this loop is waiting to take over - either from the session clips, or from the other loop
+bool SessionView::gridArrangerLoopPadPending(int32_t lane) {
+	if (!playbackHandler.playbackState) {
+		return false;
+	}
+	if (currentPlaybackMode == &session) {
+		return (session.launchEventAtSwungTickCount && session.switchToArrangementAtLaunchEvent
+		        && currentSong->isArrangerLoopOn(lane));
+	}
+	return (currentSong->arrangerLoopQueuedLane == lane);
+}
+
+// Pad is lit fully while the arrangement is playing and looping this loop, blinks while the loop's waiting to take
+// over, and is dim otherwise
+bool SessionView::gridArrangerLoopPadLit(int32_t lane) {
+	if (!gridArrangerLoopPadExists(lane)) {
+		return false;
+	}
+	if (gridArrangerLoopPadPending(lane)) {
+		return !((AudioEngine::audioSampleTimer >> 13) & 1); // Flips about every 190ms
+	}
+	return (playbackHandler.playbackState && currentPlaybackMode == &arrangement
+	        && currentSong->isArrangerLoopOn(lane));
+}
+
+void SessionView::gridArrangerLoopPadAction(int32_t lane) {
+	int32_t loopStart = currentSong->getArrangerLoopStart(lane);
+	int32_t loopEnd = currentSong->getArrangerLoopEnd(lane);
+
+	// Nothing in the arrangement, or no loop region to play - there's nothing to switch over to. Hint at that by
+	// flashing the SONG button, which is where you'd go to find the arrangement.
+	bool noArrangement = !currentSong->arrangementHasAnyClipInstances();
+	if (noArrangement || loopEnd <= loopStart) {
+		indicator_leds::blinkLed(IndicatorLED::SESSION_VIEW, 4, 1);
+		if (display->haveOLED()) {
+			display->displayPopup(noArrangement ? "No arrangement" : "No loop region");
+		}
+		return;
+	}
+
+	// The arrangement doesn't loop while recording
+	if (playbackHandler.recording != RecordingMode::OFF) {
+		display->displayPopup(display->haveOLED() ? "Not while recording" : "CANT");
+		return;
+	}
+
+	// Not playing - just make this the loop that's switched on
+	if (!playbackHandler.playbackState) {
+		currentSong->setArrangerLoopOn(lane, true);
+	}
+
+	// Session clips are playing - switch over to the arrangement, starting at this loop's point A, once the
+	// current clips have finished
+	else if (currentPlaybackMode == &session) {
+		bool alreadyArmed = (session.launchEventAtSwungTickCount && session.switchToArrangementAtLaunchEvent);
+
+		// Pressing the pad that's already waiting cancels it
+		if (alreadyArmed && currentSong->isArrangerLoopOn(lane)) {
+			session.switchToArrangementAtLaunchEvent = false;
+
+			// And unless some clips are waiting to launch at the same moment, there's no launch event any more
+			bool anyClipArmed = false;
+			for (int32_t c = 0; c < currentSong->sessionClips.getNumElements(); c++) {
+				if (currentSong->sessionClips.getClipAtIndex(c)->armState != ArmState::OFF) {
+					anyClipArmed = true;
+					break;
+				}
+			}
+			if (!anyClipArmed) {
+				session.cancelAllLaunchScheduling();
+			}
+		}
+		else {
+			currentSong->setArrangerLoopOn(lane, true);
+			playbackHandler.arrangementPosToStartAtOnSwitch = loopStart;
+
+			// If the other loop was waiting already, we've just changed which one it'll be
+			if (!alreadyArmed) {
+				session.armForSwitchToArrangement();
+			}
+		}
+	}
+
+	// The arrangement is playing
+	else {
+		int32_t currentLoopStart = 0;
+		int32_t currentLoopEnd = 0;
+		bool looping =
+		    arrangement.getLoopPoints(&currentLoopStart, &currentLoopEnd) && arrangement.getLivePos() < currentLoopEnd;
+
+		// This loop's the one that's on already - all that's left to do is call off the other one, if it was waiting
+		if (currentSong->isArrangerLoopOn(lane)) {
+			currentSong->arrangerLoopQueuedLane = -1;
+		}
+
+		// The other loop's going round - this one takes over when the play-head gets to the end of it.
+		// Or if this one was waiting already, call that off.
+		else if (looping) {
+			currentSong->arrangerLoopQueuedLane = (currentSong->arrangerLoopQueuedLane == lane) ? -1 : lane;
+		}
+
+		// Nothing's looping - switch this loop on right away
+		else {
+			currentSong->setArrangerLoopOn(lane, true);
+			playbackHandler.expectEvent();
+		}
+	}
+
+	arrangerView.displayLoopLaneName(lane);
+	uiNeedsRendering(this, 0, 0xFFFFFFFF);
+}
+
 ActionResult SessionView::gridHandlePads(int32_t x, int32_t y, int32_t on) {
 	// Except for the path to sectionPadAction in the original function all paths contained this check. Can probably
 	// be refactored
@@ -3984,6 +4133,18 @@ ActionResult SessionView::gridHandlePads(int32_t x, int32_t y, int32_t on) {
 			case GridMode::MAGENTA: {
 				if (enableLoopPads) {
 					playbackHandler.tryLoopCommand(GlobalMIDICommand::LOOP_CONTINUOUS_LAYERING);
+				}
+				break;
+			}
+			case GridMode::ARRANGER_LOOP: {
+				if (gridArrangerLoopPadExists(0)) {
+					gridArrangerLoopPadAction(0);
+				}
+				break;
+			}
+			case GridMode::ARRANGER_LOOP_FX: {
+				if (gridArrangerLoopPadExists(1)) {
+					gridArrangerLoopPadAction(1);
 				}
 				break;
 			}

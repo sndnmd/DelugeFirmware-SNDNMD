@@ -1155,7 +1155,126 @@ void Song::writeTemplateSong(const char* templatePath) {
 	                                      "\n</song>\n");
 }
 
+// The song params which the second arranger loop has its own settings for: everything the gold knobs reach at song
+// level, apart from tempo (which has to keep following the song) and stutter.
+static const std::array<uint8_t, Song::kNumArrangerLoop2FxParams> arrangerLoop2FxParamIds = {
+    params::UNPATCHED_BASS,
+    params::UNPATCHED_TREBLE,
+    params::UNPATCHED_BASS_FREQ,
+    params::UNPATCHED_TREBLE_FREQ,
+    params::UNPATCHED_SAMPLE_RATE_REDUCTION,
+    params::UNPATCHED_BITCRUSHING,
+    params::UNPATCHED_MOD_FX_OFFSET,
+    params::UNPATCHED_MOD_FX_FEEDBACK,
+    params::UNPATCHED_SIDECHAIN_SHAPE,
+    params::UNPATCHED_COMPRESSOR_THRESHOLD,
+    params::UNPATCHED_MOD_FX_RATE,
+    params::UNPATCHED_MOD_FX_DEPTH,
+    params::UNPATCHED_DELAY_RATE,
+    params::UNPATCHED_DELAY_AMOUNT,
+    params::UNPATCHED_PAN,
+    params::UNPATCHED_LPF_FREQ,
+    params::UNPATCHED_LPF_RES,
+    params::UNPATCHED_LPF_MORPH,
+    params::UNPATCHED_HPF_FREQ,
+    params::UNPATCHED_HPF_RES,
+    params::UNPATCHED_HPF_MORPH,
+    params::UNPATCHED_REVERB_SEND_AMOUNT,
+    params::UNPATCHED_VOLUME,
+    params::UNPATCHED_SIDECHAIN_VOLUME,
+    params::UNPATCHED_PITCH_ADJUST,
+};
+
+// Starts a fade between the song's own FX settings and the second arranger loop's. The latter have to be engaged
+// already, so right now the params hold the second loop's settings. Follow up with setArrangerLoop2FxFadeAmount().
+void Song::beginArrangerLoop2FxFade() {
+	if (!arrangerLoop2FxEngaged) {
+		return;
+	}
+	endArrangerLoop2FxFade(); // In case one was already underway
+
+	UnpatchedParamSet* unpatchedParams = paramManager.getUnpatchedParamSet();
+	for (int32_t i = 0; i < kNumArrangerLoop2FxParams; i++) {
+		int32_t value = unpatchedParams->params[arrangerLoop2FxParamIds[i]].currentValue;
+		arrangerLoop2FxFadeLoop2Values[i] = value;
+		arrangerLoop2FxFadeLastWritten[i] = value;
+	}
+	arrangerLoop2FxFadeParamsGrabbed = 0;
+	arrangerLoop2FxFading = true;
+}
+
+// Sets where the fade's at: 0 is the song's own settings, 65536 the second arranger loop's.
+// If a knob gets turned during the fade, that param drops out of it, and what it got turned to becomes the second
+// loop's setting for it - just like turning a knob while those settings are engaged normally.
+void Song::setArrangerLoop2FxFadeAmount(int32_t amount) {
+	if (!arrangerLoop2FxFading || !arrangerLoop2FxEngaged) {
+		return;
+	}
+
+	UnpatchedParamSet* unpatchedParams = paramManager.getUnpatchedParamSet();
+	bool anyChange = false;
+
+	for (int32_t i = 0; i < kNumArrangerLoop2FxParams; i++) {
+		if (arrangerLoop2FxFadeParamsGrabbed & (1 << i)) {
+			continue;
+		}
+
+		AutoParam* param = &unpatchedParams->params[arrangerLoop2FxParamIds[i]];
+
+		if (param->currentValue != arrangerLoop2FxFadeLastWritten[i]) {
+			arrangerLoop2FxFadeLoop2Values[i] = param->currentValue;
+			arrangerLoop2FxFadeParamsGrabbed |= (1 << i);
+			continue;
+		}
+
+		int32_t songValue = arrangerLoop2Fx[i].value; // The song's own value is what's stashed while we're engaged
+		int64_t distance = (int64_t)arrangerLoop2FxFadeLoop2Values[i] - songValue;
+		int32_t value = songValue + (int32_t)((distance * amount) >> 16);
+
+		if (value != param->currentValue) {
+			param->currentValue = value;
+			anyChange = true;
+		}
+		arrangerLoop2FxFadeLastWritten[i] = value;
+	}
+
+	if (anyChange) {
+		view.notifyParamAutomationOccurred(&paramManager, true);
+	}
+}
+
+// Ends a fade, leaving the params holding the second arranger loop's actual settings
+void Song::endArrangerLoop2FxFade() {
+	if (!arrangerLoop2FxFading) {
+		return;
+	}
+	arrangerLoop2FxFading = false;
+
+	if (!arrangerLoop2FxEngaged) {
+		return;
+	}
+
+	UnpatchedParamSet* unpatchedParams = paramManager.getUnpatchedParamSet();
+	for (int32_t i = 0; i < kNumArrangerLoop2FxParams; i++) {
+		if (!(arrangerLoop2FxFadeParamsGrabbed & (1 << i))) {
+			unpatchedParams->params[arrangerLoop2FxParamIds[i]].currentValue = arrangerLoop2FxFadeLoop2Values[i];
+		}
+	}
+	view.notifyParamAutomationOccurred(&paramManager, true);
+}
+
+// Makes the second arranger loop's FX settings the same as the song's own again. If they're engaged, this
+// disengages them - the caller can engage them afresh, at which point they get copied from the song.
+void Song::resetArrangerLoop2Fx() {
+	setArrangerLoop2FxEngaged(false);
+	arrangerLoop2FxValid = false;
+}
+
 void Song::writeToFile() {
+
+	// The second arranger loop's FX settings must not get saved as the song's own
+	bool reEngageArrangerLoop2Fx = arrangerLoop2FxEngaged;
+	setArrangerLoop2FxEngaged(false);
 
 	setupClipIndexesForSaving();
 	Serializer& writer = GetSerializer();
@@ -1201,6 +1320,16 @@ weAreInArrangementEditorOrInClipInstance:
 	}
 
 	writer.writeAttribute("arrangementAutoScrollOn", arrangerAutoScrollModeActive);
+
+	// Arranger loop (community feature). Only written once it's been changed from its defaults, so songs that don't
+	// use it come out exactly as before. Firmware that doesn't know these attributes just skips them.
+	if (arrangerLoopStart != 0 || arrangerLoopEnd != 0) {
+		writer.writeAttribute("arrangerLoopStart", arrangerLoopStart);
+		writer.writeAttribute("arrangerLoopEnd", arrangerLoopEnd);
+	}
+	if (!arrangerLoopOn) {
+		writer.writeAttribute("arrangerLoopOn", arrangerLoopOn);
+	}
 
 	writer.writeAttribute("xScroll", xScroll[NAVIGATION_CLIP]);
 	writer.writeAttribute("xZoom", xZoom[NAVIGATION_CLIP]);
@@ -1288,6 +1417,24 @@ weAreInArrangementEditorOrInClipInstance:
 	writer.writeOpeningTagEnd();
 	GlobalEffectableForClip::writeParamTagsToFile(writer, &paramManager, true, valuesForOverride);
 	writer.writeClosingTag("songParams");
+
+	// Second arranger loop (community feature), if it's been touched at all.
+	// Its FX settings are stored by param name, so they survive params being added or reordered in later firmware.
+	if (arrangerLoop2On || !arrangerLoop2Coupled || arrangerLoop2FxValid) {
+		writer.writeOpeningTagBeginning("arrangerLoop2");
+		writer.writeAttribute("on", arrangerLoop2On);
+		writer.writeAttribute("coupled", arrangerLoop2Coupled);
+		writer.writeAttribute("start", arrangerLoop2Start);
+		writer.writeAttribute("end", arrangerLoop2End);
+		if (arrangerLoop2FxValid) {
+			for (int32_t i = 0; i < kNumArrangerLoop2FxParams; i++) {
+				char const* name = params::paramNameForFile(params::Kind::UNPATCHED_GLOBAL,
+				                                            params::UNPATCHED_START + arrangerLoop2FxParamIds[i]);
+				writer.writeAttributeHex(name, arrangerLoop2Fx[i].value, 8);
+			}
+		}
+		writer.closeTag();
+	}
 
 	writer.writeArrayStart("instruments");
 	for (Output* thisOutput = firstOutput; thisOutput; thisOutput = thisOutput->next) {
@@ -1421,6 +1568,10 @@ weAreInArrangementEditorOrInClipInstance:
 	writer.writeClosingTag("scales");
 
 	writer.writeClosingTag("song", true, true);
+
+	if (reEngageArrangerLoop2Fx) {
+		setArrangerLoop2FxEngaged(true);
+	}
 }
 
 Error Song::readFromFile(Deserializer& reader) {
@@ -1669,6 +1820,71 @@ unknownTag:
 			else if (!strcmp(tagName, "arrangementAutoScrollOn")) {
 				arrangerAutoScrollModeActive = reader.readTagOrAttributeValueInt();
 				reader.exitTag("arrangementAutoScrollOn");
+			}
+
+			else if (!strcmp(tagName, "arrangerLoopStart")) {
+				arrangerLoopStart = std::max((int32_t)0, reader.readTagOrAttributeValueInt());
+				reader.exitTag("arrangerLoopStart");
+			}
+
+			else if (!strcmp(tagName, "arrangerLoopEnd")) {
+				arrangerLoopEnd = std::max((int32_t)0, reader.readTagOrAttributeValueInt());
+				reader.exitTag("arrangerLoopEnd");
+			}
+
+			else if (!strcmp(tagName, "arrangerLoopOn")) {
+				arrangerLoopOn = reader.readTagOrAttributeValueInt();
+				reader.exitTag("arrangerLoopOn");
+			}
+
+			else if (!strcmp(tagName, "arrangerLoop2")) {
+				while (*(tagName = reader.readNextTagOrAttributeName())) {
+					if (!strcmp(tagName, "on")) {
+						arrangerLoop2On = reader.readTagOrAttributeValueInt();
+						reader.exitTag("on");
+					}
+					else if (!strcmp(tagName, "coupled")) {
+						arrangerLoop2Coupled = reader.readTagOrAttributeValueInt();
+						reader.exitTag("coupled");
+					}
+					else if (!strcmp(tagName, "start")) {
+						arrangerLoop2Start = std::max((int32_t)0, reader.readTagOrAttributeValueInt());
+						reader.exitTag("start");
+					}
+					else if (!strcmp(tagName, "end")) {
+						arrangerLoop2End = std::max((int32_t)0, reader.readTagOrAttributeValueInt());
+						reader.exitTag("end");
+					}
+					else {
+						// Anything else should be one of its FX settings, named after the param
+						int32_t p = params::fileStringToParam(params::Kind::UNPATCHED_GLOBAL, tagName, false)
+						            - params::UNPATCHED_START;
+						int32_t whichFxParam = -1;
+						for (int32_t i = 0; i < kNumArrangerLoop2FxParams; i++) {
+							if (arrangerLoop2FxParamIds[i] == p) {
+								whichFxParam = i;
+								break;
+							}
+						}
+
+						if (whichFxParam != -1) {
+							// If we don't get given all of them, the rest are whatever the song's own settings are
+							if (!arrangerLoop2FxValid) {
+								for (int32_t j = 0; j < kNumArrangerLoop2FxParams; j++) {
+									arrangerLoop2Fx[j].value =
+									    paramManager.getUnpatchedParamSet()->getValue(arrangerLoop2FxParamIds[j]);
+								}
+								arrangerLoop2FxValid = true;
+							}
+							arrangerLoop2Fx[whichFxParam].value = reader.readTagOrAttributeValueHex(0);
+							reader.exitTag();
+						}
+						else {
+							reader.exitTag(tagName);
+						}
+					}
+				}
+				reader.exitTag("arrangerLoop2");
 			}
 
 			else if (!strcmp(tagName, "timePerTimerTick")) {
@@ -4764,6 +4980,122 @@ bool Song::arrangementHasAnyClipInstances() {
 	return false;
 }
 
+// Where the last ClipInstance in the arrangement ends
+int32_t Song::getArrangementLength() {
+	int32_t maxEndPos = 0;
+	for (Output* thisOutput = firstOutput; thisOutput; thisOutput = thisOutput->next) {
+		int32_t numElements = thisOutput->clipInstances.getNumElements();
+		if (numElements) {
+			ClipInstance* lastInstance = thisOutput->clipInstances.getElement(numElements - 1);
+			maxEndPos = std::max(maxEndPos, lastInstance->pos + lastInstance->length);
+		}
+	}
+	return maxEndPos;
+}
+
+// Point A of an arranger loop. The second loop (lane 1) has the same points as the first until it's decoupled.
+int32_t Song::getArrangerLoopStart(int32_t lane) {
+	return (lane && !arrangerLoop2Coupled) ? arrangerLoop2Start : arrangerLoopStart;
+}
+
+// Point B as stored - 0 means it hasn't been placed, and follows the end of the arrangement
+int32_t Song::getArrangerLoopEndAsSet(int32_t lane) {
+	return (lane && !arrangerLoop2Coupled) ? arrangerLoop2End : arrangerLoopEnd;
+}
+
+// Point B of an arranger loop. Until the user has placed it, it sits at the end of the arrangement.
+// If the result isn't greater than point A, there's no loop region.
+int32_t Song::getArrangerLoopEnd(int32_t lane) {
+	int32_t start = getArrangerLoopStart(lane);
+	int32_t end = getArrangerLoopEndAsSet(lane);
+	if (end > start) {
+		return end;
+	}
+	return std::max(getArrangementLength(), start);
+}
+
+// Changing the second loop's points decouples it from the first
+void Song::setArrangerLoopPoints(int32_t lane, int32_t start, int32_t end) {
+	if (lane) {
+		arrangerLoop2Start = start;
+		arrangerLoop2End = end;
+		arrangerLoop2Coupled = false;
+	}
+	else {
+		arrangerLoopStart = start;
+		arrangerLoopEnd = end;
+	}
+}
+
+// Only one of the two loops can be on at a time
+void Song::setArrangerLoopOn(int32_t lane, bool on) {
+	arrangerLoopQueuedLane = -1; // Whatever was queued up, this outranks it
+	if (lane) {
+		arrangerLoop2On = on;
+		if (on) {
+			arrangerLoopOn = false;
+		}
+	}
+	else {
+		arrangerLoopOn = on;
+		if (on) {
+			arrangerLoop2On = false;
+		}
+	}
+}
+
+// Switches the song's FX params between the song's own settings and the second arranger loop's.
+// Engaging swaps the second loop's values in and stashes the song's values - along with any automation, so that it
+// can't fight the second loop's settings. From then on, knob turns land in the second loop's settings.
+// Disengaging swaps everything back, and the song's automation picks up again from wherever playback is.
+void Song::setArrangerLoop2FxEngaged(bool engage) {
+	if (engage == arrangerLoop2FxEngaged) {
+		return;
+	}
+
+	// If we're part-way through a fade, the params need to hold the second loop's actual settings again before
+	// those get stashed
+	if (!engage) {
+		endArrangerLoop2FxFade();
+	}
+
+	char modelStackMemory[MODEL_STACK_MAX_SIZE];
+	ModelStackWithThreeMainThings* modelStack = setupModelStackWithSongAsTimelineCounter(modelStackMemory);
+
+	for (int32_t i = 0; i < kNumArrangerLoop2FxParams; i++) {
+		ModelStackWithAutoParam* modelStackWithParam =
+		    modelStack->getUnpatchedAutoParamFromId(arrangerLoop2FxParamIds[i]);
+		if (!modelStackWithParam || !modelStackWithParam->autoParam) {
+			continue;
+		}
+		AutoParam* param = modelStackWithParam->autoParam;
+
+		// First time ever - the second loop starts out with the song's settings as they are now
+		if (engage && !arrangerLoop2FxValid) {
+			arrangerLoop2Fx[i].value = param->getCurrentValue();
+		}
+
+		param->swapState(&arrangerLoop2Fx[i], modelStackWithParam);
+
+		if (engage) {
+			param->cancelOverriding();
+		}
+		else {
+			// The second loop only keeps values - drop any automation that got recorded while it was engaged
+			arrangerLoop2Fx[i].nodes.empty();
+		}
+	}
+
+	arrangerLoop2FxValid = true;
+	arrangerLoop2FxEngaged = engage;
+
+	// The song's automation is back, but the values we just restored are from when we engaged. Catch up.
+	if (!engage && this == currentSong && currentPlaybackMode == &arrangement
+	    && playbackHandler.isEitherClockActive()) {
+		paramManager.setPlayPos(arrangement.getLivePos(), modelStack, false);
+	}
+}
+
 void Song::setParamsInAutomationMode(bool newState) {
 
 	if (paramsInAutomationMode == newState) {
@@ -4771,6 +5103,11 @@ void Song::setParamsInAutomationMode(bool newState) {
 	}
 
 	paramsInAutomationMode = newState;
+
+	// This is all about the song's own values, so if the second arranger loop's FX settings are swapped in right now,
+	// swap them out while we're at it
+	bool reEngageArrangerLoop2Fx = arrangerLoop2FxEngaged;
+	setArrangerLoop2FxEngaged(false);
 
 	UnpatchedParamSet* unpatchedParams = paramManager.getUnpatchedParamSet();
 
@@ -4792,6 +5129,10 @@ void Song::setParamsInAutomationMode(bool newState) {
 				unpatchedParams->params[p].currentValue = unautomatedParamValues[p];
 			}
 		}
+	}
+
+	if (reEngageArrangerLoop2Fx) {
+		setArrangerLoop2FxEngaged(true);
 	}
 
 	view.notifyParamAutomationOccurred(&paramManager, true);

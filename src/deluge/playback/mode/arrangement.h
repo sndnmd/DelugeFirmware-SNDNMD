@@ -52,9 +52,13 @@ public:
 	                                  bool shouldCloneRepeats = false);
 	int32_t getLivePos(uint32_t* timeRemainder = nullptr);
 	void endAnyLinearRecording();
+	bool getLoopPoints(int32_t* loopStart, int32_t* loopEnd);
 
 	int32_t lastProcessedPos;
 	int32_t playbackStartedAtPos;
+
+private:
+	void jumpToLoopStart(int32_t newPos);
 };
 
 extern Arrangement arrangement;

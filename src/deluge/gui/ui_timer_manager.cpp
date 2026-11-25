@@ -19,6 +19,7 @@
 #include "definitions_cxx.hpp"
 #include "gui/ui/keyboard/keyboard_screen.h"
 #include "gui/ui/sound_editor.h"
+#include "gui/views/arranger_view.h"
 #include "gui/views/automation_view.h"
 #include "gui/views/instrument_clip_view.h"
 #include "gui/views/performance_view.h"
@@ -227,6 +228,9 @@ void UITimerManager::routine() {
 					if (uartGetTxBufferSpace(UART_ITEM_PIC_PADS) > kNumBytesInColUpdateMessage) {
 						getCurrentUI()->graphicsRoutine();
 					}
+					// Second arranger loop's FX settings fall back to the song's when its pad is let go, its lane
+					// muted, etc. - in whatever view that happens
+					arrangerView.updateLoop2Fx();
 					setTimer(TimerName::GRAPHICS_ROUTINE, 15);
 					break;
 

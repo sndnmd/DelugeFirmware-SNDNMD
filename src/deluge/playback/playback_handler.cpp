@@ -214,7 +214,9 @@ void PlaybackHandler::playButtonPressed(int32_t buttonPressLatency) {
 		    (accessibility && Buttons::isButtonPressed(deluge::hid::button::CROSS_SCREEN_EDIT))
 		    || (!accessibility && Buttons::isButtonPressed(deluge::hid::button::X_ENC));
 
-		bool isArrangementPadPressed = isArrangerView && isUIModeActive(UI_MODE_HOLDING_ARRANGEMENT_ROW);
+		// Holding a pad inside the arranger loop (community feature) counts too - that starts from loop point A
+		bool isArrangementPadPressed =
+		    isArrangerView && (isUIModeActive(UI_MODE_HOLDING_ARRANGEMENT_ROW) || arrangerView.isHoldingLoopLane());
 		// placeholders:
 		// isSongPadPressed = restart playhead in song view
 		// isClipPadPressed = restart playhead in clip view
@@ -346,7 +348,9 @@ void PlaybackHandler::setupPlaybackUsingInternalClock(int32_t buttonPressLatency
 		                      || (rootUI == &automationView && automationView.onArrangerView);
 
 		// second priority - if we're holding pad in arranger, play from that pad
-		isArrangementPadPressed = isArrangerView && isUIModeActive(UI_MODE_HOLDING_ARRANGEMENT_ROW);
+		// (or a pad inside the arranger loop, which plays from loop point A)
+		isArrangementPadPressed =
+		    isArrangerView && (isUIModeActive(UI_MODE_HOLDING_ARRANGEMENT_ROW) || arrangerView.isHoldingLoopLane());
 
 		// if not holding arranger pad, we'll check the scenarios for starting playback from current screen
 		if (!isArrangementPadPressed) {

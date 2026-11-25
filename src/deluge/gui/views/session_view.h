@@ -259,6 +259,13 @@ private:
 	void gridStartSection(uint32_t section, bool instant);
 	void gridToggleClipPlay(Clip* clip, bool instant);
 
+	// Sidebar pads for the arranger loops (community features "Arranger Loop" and "Arranger Loop 2+FX")
+	bool gridArrangerLoopPadExists(int32_t lane);
+	bool gridArrangerLoopPadPending(int32_t lane);
+	bool gridArrangerLoopPadLit(int32_t lane);
+	void gridArrangerLoopPadAction(int32_t lane);
+	uint8_t gridArrangerLoopPadsLastRendered = 0;
+
 	[[nodiscard]] const size_t gridTrackCount() const;
 	uint32_t gridClipCountForTrack(Output* track);
 	uint32_t gridTrackIndexFromTrack(Output* track, uint32_t maxTrack);

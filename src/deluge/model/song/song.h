@@ -32,6 +32,7 @@
 #include "model/scale/scale_mapper.h"
 #include "model/sync.h"
 #include "model/timeline_counter.h"
+#include "modulation/automation/auto_param.h"
 #include "modulation/params/param.h"
 #include "modulation/params/param_manager.h"
 #include "storage/flash_storage.h"
@@ -243,6 +244,37 @@ public:
 
 	bool arrangerAutoScrollModeActive;
 
+	// Arranger loop (community feature "Arranger Loop"). Saved with the song once changed from these defaults.
+	int32_t arrangerLoopStart = 0; // Point A, in arrangement ticks
+	int32_t arrangerLoopEnd = 0;   // Point B. 0 means "not set yet" - follow the end of the arrangement
+	bool arrangerLoopOn = true;    // The loop lane's "mute" state. When false, the arrangement doesn't loop
+
+	// Second arranger loop (community feature "Arranger Loop 2+FX"). Only one of the two loops can be on at a time.
+	// While "coupled", it has the same points as the first loop.
+	int32_t arrangerLoop2Start = 0;
+	int32_t arrangerLoop2End = 0;
+	bool arrangerLoop2Coupled = true;
+	bool arrangerLoop2On = false;
+
+	// Loop (0 or 1) that's been queued up from the grid's sidebar while the arrangement is looping the other one. It
+	// takes over once the play-head gets to the end of the current loop. -1 if none. Not saved.
+	int8_t arrangerLoopQueuedLane = -1;
+
+	// The second loop's own settings for the song's FX params. While "engaged", these are swapped into the song's
+	// params, and this array instead holds the song's own values and automation, to be swapped back afterwards.
+	static constexpr int32_t kNumArrangerLoop2FxParams = 25;
+	AutoParamState arrangerLoop2Fx[kNumArrangerLoop2FxParams];
+	bool arrangerLoop2FxValid = false; // Whether arrangerLoop2Fx has been given any values yet
+	bool arrangerLoop2FxEngaged = false;
+	bool arrangerLoop2FxLatched = false;
+
+	// A fade between the song's own FX settings and the second loop's, while the latter are engaged. During one, the
+	// song's params hold in-between values, so the second loop's actual settings are kept here.
+	bool arrangerLoop2FxFading = false;
+	int32_t arrangerLoop2FxFadeLoop2Values[kNumArrangerLoop2FxParams];
+	int32_t arrangerLoop2FxFadeLastWritten[kNumArrangerLoop2FxParams];
+	uint32_t arrangerLoop2FxFadeParamsGrabbed = 0; // Bit per param whose knob got turned during the fade
+
 	MIDIInstrument* hibernatingMIDIInstrument;
 
 	bool outputClipInstanceListIsCurrentlyInvalid; // Set to true during scenarios like replaceInstrument(), to warn
@@ -343,6 +375,27 @@ public:
 	void clearArrangementBeyondPos(int32_t pos, Action* action);
 	void deletingClipInstanceForClip(Output* output, Clip* clip, Action* action, bool shouldPickNewActiveClip);
 	bool arrangementHasAnyClipInstances();
+	int32_t getArrangementLength();
+	// For these, lane 0 is the first arranger loop and lane 1 the second
+	int32_t getArrangerLoopStart(int32_t lane);
+	int32_t getArrangerLoopEnd(int32_t lane);
+	int32_t getArrangerLoopEndAsSet(int32_t lane);
+	void setArrangerLoopPoints(int32_t lane, int32_t start, int32_t end);
+	bool isArrangerLoopOn(int32_t lane) { return lane ? arrangerLoop2On : arrangerLoopOn; }
+	void setArrangerLoopOn(int32_t lane, bool on);
+	void setArrangerLoop2FxEngaged(bool engage);
+	void resetArrangerLoop2Fx();
+	void beginArrangerLoop2FxFade();
+	void setArrangerLoop2FxFadeAmount(int32_t amount);
+	void endArrangerLoop2FxFade();
+	// Back to looping the whole arrangement, however long that is
+	void resetArrangerLoop() {
+		arrangerLoopStart = 0;
+		arrangerLoopEnd = 0;
+		arrangerLoop2Start = 0;
+		arrangerLoop2End = 0;
+		arrangerLoop2Coupled = true;
+	}
 	void resumeClipsClonedForArrangementRecording();
 	void setParamsInAutomationMode(bool newState);
 	bool shouldOldOutputBeReplaced(Clip* clip, Availability* availabilityRequirement = nullptr);

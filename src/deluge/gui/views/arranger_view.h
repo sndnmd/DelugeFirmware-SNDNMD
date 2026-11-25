@@ -120,6 +120,34 @@ public:
 
 	int32_t xScrollWhenPlaybackStarted{};
 
+	// Arranger loop lanes (community features "Arranger Loop" and "Arranger Loop 2+FX"). Lane 0 is the first loop,
+	// lane 1 the second.
+	enum class LoopMarker : uint8_t { NONE, START, END };
+	LoopMarker loopMarkerSelected{LoopMarker::NONE}; // The marker that's blinking, waiting to be placed
+	int8_t loopMarkerSelectedLane{0};                // And which lane it's on
+	bool loopMarkerBlinkOn{};
+	int8_t loopLaneHeldX{-1}; // Pad inside a loop region that's being held down. -1 if none
+	int8_t loopLaneHeldY{-1};
+	int8_t loopLaneHeldLane{0};
+	bool loopLaneShiftTap{};                            // Held pad was pressed with SHIFT down
+	bool loopLaneHoldUsed{};                            // Held pad got used for PLAY or <>
+	bool loopLaneRecouplePending{};                     // <> pressed while holding the second loop
+	LoopMarker loopLanePressedMarker{LoopMarker::NONE}; // Marker on the held pad, if any
+	int32_t getLoopLaneYDisplay(int32_t lane = 0);
+	int32_t getLoopLaneFromYDisplay(int32_t yDisplay);
+	bool isHoldingLoopLane();
+	void updateLoop2Fx();
+
+	// Fading the second loop's FX settings in or out
+	enum class Loop2Fade : uint8_t { NONE, IN, OUT };
+	Loop2Fade loop2Fade{Loop2Fade::NONE};
+	bool loop2FadeRepeat{};   // Latched fade which starts over each time the loop comes round
+	bool loop2FadeFromHold{}; // The pad which the fade was started from is still being held
+	uint32_t loop2FadeStartSample{};
+	uint32_t loop2FadeLengthSamples{};
+	int32_t loop2FadeLastLivePos{};
+	void displayLoopLaneName(int32_t lane);
+
 	// ui
 	UIType getUIType() override { return UIType::ARRANGER; }
 	UIModControllableContext getUIModControllableContext() override { return UIModControllableContext::SONG; }
@@ -169,6 +197,18 @@ private:
 	void deleteClipInstance(Output* output, ClipInstance* clipInstance);
 	void createNewClipForClipInstance(Output* output, ClipInstance* clipInstance);
 	void recordEditPadPress(Output* output, ClipInstance* clipInstance, int32_t x, int32_t y, int32_t xScroll);
+
+	// arranger loop lanes
+	void renderLoopLane(int32_t lane, int32_t xScroll, uint32_t xZoom, RGB* image, int32_t renderWidth);
+	void loopLanePadAction(int32_t lane, int32_t x, int32_t y);
+	void loopLanePadReleased();
+	void shiftLoop(int32_t lane, int32_t shift);
+	void loopLaneStatusPadAction(int32_t lane, int32_t y, UI* ui);
+	bool isLoopLanePadDown();
+	bool isAnyPadDownOnLoopLane(int32_t lane);
+	void toggleLoop2FxLatch();
+	void startLoop2Fade(bool fadeOut, int32_t numBars, int32_t lengthTicks, bool latchAndRepeat);
+	void loopPointsChanged();
 };
 
 extern ArrangerView arrangerView;

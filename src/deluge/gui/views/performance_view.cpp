@@ -795,6 +795,9 @@ ActionResult PerformanceView::buttonAction(deluge::hid::Button b, bool on, bool 
 						display->displayError(error);
 						return ActionResult::DEALT_WITH;
 					}
+					// A newly recorded arrangement gets looped as a whole
+					currentSong->resetArrangerLoop();
+
 					playbackHandler.recording = RecordingMode::ARRANGEMENT;
 					playbackHandler.setupPlaybackUsingInternalClock();
 
